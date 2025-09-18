@@ -1,0 +1,409 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Load standard packages
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+rm(list = ls())
+library(tidyverse)
+library(scales)
+library(broom)
+library(tidyheatmaps)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(scales)
+library(ggdendro)
+library(ggrepel)
+library(lavaan)
+library(enrichplot)
+library(lme4)
+library(lmerTest)
+library(broom.mixed)
+setwd("~/Desktop/R_work/Standards")
+list.files() %>% map(source)
+```
+Define directories
+```{r}
+dir_raw <- "/path/to/your/directory"
+dir_plots <- "/path/to/your/directory"
+dir_stats <- "/path/to/your/directory"
+dir_obj <- "/path/to/your/directory"
+```
+load in data
+```{r}
+#read somascan and adni data
+data_soma <- readRDS("/path/to/your/file")
+data_adni <- readRDS("/path/to/your/file")
+#read data pathway data (genes per pathway)
+data_pathway <- "/path/to/your/file"
+```
+generate the scores
+```{r}
+data_score <- 
+  data_pathway %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    score = map(data, function(x){
+      data_soma %>% 
+        dplyr::select(RID, zscore_cn, EntrezGeneSymbol2) %>% 
+        filter(EntrezGeneSymbol2 %in% x$value) %>% 
+        group_by(RID) %>% 
+        summarise(value = mean(zscore_cn, na.rm = T))
+        })
+    )
+data_score_ind <-
+  data_score %>% 
+  dplyr::select(score) %>% 
+  unnest() %>% 
+  group_by(name) %>% 
+  mutate(val_z = FUN.scale_z(value)) %>% 
+  ungroup()
+```
+generate a data frame which is used for subsequent analysis
+```{r}
+adni_merge_incl <- 
+  data_soma %>% # long format
+  ungroup() %>% 
+  filter(Target == "CRBB2") %>% # one target wich is available in all individiduals
+  dplyr::select(-EntrezGeneSymbol) %>% 
+  dplyr::select(RID, VISCODE2, diagnosis_v2, diagnosis_v3, diagnosis_v4, diagnosis_v5, AGE, PTGENDER, PTEDUCAT, APOE4, AV45, ABETA, PTAU, MMSE, Hippocampus, A_total:AT) %>%
+  mutate(diagnosis_v6 = paste(diagnosis_v4, AT, sep = "_"),
+         diagnosis_v7 = if_else(diagnosis_v6 %in% c("CN_00"), "CN_0", diagnosis_v6),
+         diagnosis_v7 = if_else(diagnosis_v6 %in% c("CN_10", "CN_11"), "CN_1", diagnosis_v7),
+         diagnosis_v7 = if_else(diagnosis_v6 %in% c("CI_00"), "CI_0", diagnosis_v7),
+         diagnosis_v7 = if_else(diagnosis_v6 %in% c("CI_10", "CI_11"), "CI_1", diagnosis_v7)
+         ) %>% 
+  filter(ATN2 %in% c("000", "100", "110", "111"))
+```
+Compare GFAP in different conditions in the CSF
+```{r}
+adni_merge_incl %>% 
+  dplyr::select(RID, VISCODE2, diagnosis_v7) %>% 
+  filter(diagnosis_v7 %in% c("CN_0", "CN_1")) %>% 
+  left_join((data_soma %>% filter(EntrezGeneSymbol2 == "GFAP")), by = c("RID", "VISCODE2")) %>% 
+  ggplot(aes(x = diagnosis_v7, y = zscore_cn, fill = diagnosis_v7)) +
+  geom_violin(draw_quantiles = 0.5) +
+  scale_fill_manual(values = cbPalette[c(1,2)]) +
+  pl_msw0_legend +
+  stat_compare_means(method = "t.test", comparisons = list(c("CN_0", "CN_1")), hide.ns = F, label = "p.signif") +
+  plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+```
+make volcano plot for ci a+ vs cu a-
+```{r}
+comp_cu0_ci1 <- 
+  data_soma %>% 
+  filter(diagnosis_v6 %in% c("CN_00", "CI_10", "CI_11"), !is.na(value), RID %in% adni_merge_incl$RID) %>% 
+  mutate(diagnosis_v7 = if_else(diagnosis_v6 == "CN_00", "0", "1")) %>% 
+  compare_means(data = ., value~diagnosis_v7, "t.test", p.adjust.method = "fdr", group.by = "EntrezGeneSymbol2")
+comp_cu0_ci1 <- comp_cu0_ci1 %>% add_column(padj2 = comp_cu0_ci1$p, length(comp_cu0_ci1$p), "fdr")
+
+est_cu0_ci1 <- 
+  data_soma %>% 
+  filter(diagnosis_v6 %in% c("CN_00", "CI_10", "CI_11"), !is.na(value), RID %in% adni_merge_incl$RID) %>% 
+  mutate(diagnosis_v7 = if_else(diagnosis_v6 == "CN_00", "0", "1")) %>% 
+  group_by(EntrezGeneSymbol2, diagnosis_v7) %>% 
+  summarise(mean = mean(value, na.rm = T)) %>% 
+  pivot_wider(id_cols = EntrezGeneSymbol2, names_from = diagnosis_v7, values_from = mean) %>% 
+  mutate(diff = `1` / `0`,
+         log2fc = log2(diff))
+
+comp_cu0_ci1 %>% 
+  dplyr::select(EntrezGeneSymbol2, p.adj) %>% 
+  left_join(est_cu0_ci1, by = "EntrezGeneSymbol2") %>% 
+  arrange(p.adj) %>% 
+  mutate(nlogpadj = -log10(p.adj),
+         color = if_else(log2fc < 0 & p.adj < 0.05, muted("blue"), "grey80"),
+         color = if_else(log2fc > 0 & p.adj < 0.05, muted("red"), color),
+         label = if_else(row_number() <= 15, EntrezGeneSymbol2, NA)) %>% 
+  ggplot(aes(x = log2fc, y = nlogpadj)) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(aes(fill = color), shape = 21, color = "white") +
+  geom_text_repel(aes(label = label), size = 2.8, max.overlaps = Inf) +
+  scale_x_continuous(limits = c(NA, NA)) +
+  scale_fill_identity() +
+  labs(title = "CI A+ vs CU A-") +
+  pl_msw0_nolegend_straight +
+  plot_layout(widths = unit(4, "cm"), heights = unit(4, "cm")) 
+ggsave(file.path(dir_plots, "plot_adni_somascan_cia+vscua-.pdf"), useDingbats = F)
+
+comp_cu0_ci1 %>% 
+  dplyr::select(EntrezGeneSymbol2, padj2) %>% 
+  left_join(est_cu0_ci1, by = "EntrezGeneSymbol2") %>% 
+  arrange(padj2) %>% 
+  write.xlsx(file.path(dir_stats, "stats_paper_DE_cu0vsci1.xlsx"), overwrite = T)
+```
+make volcano plot for cu a+ vs cu a-
+```{r}
+comp_cu0_cu1 <- 
+  data_soma %>% 
+  filter(diagnosis_v6 %in% c("CN_00", "CN_10", "CN_11"), !is.na(value), RID %in% adni_merge_incl$RID) %>% 
+  mutate(diagnosis_v7 = if_else(diagnosis_v6 == "CN_00", "0", "1")) %>% 
+  compare_means(data = ., value~diagnosis_v7, "t.test", p.adjust.method = "fdr", group.by = "EntrezGeneSymbol2")
+comp_cu0_cu1 <- comp_cu0_cu1 %>% add_column(padj2 = comp_cu0_cu1$p, length(comp_cu0_cu1$p), "fdr")
+
+est_cu0_cu1 <- 
+  data_soma %>% 
+  filter(diagnosis_v6 %in% c("CN_00", "CN_10", "CN_11"), !is.na(value), RID %in% adni_merge_incl$RID) %>% 
+  mutate(diagnosis_v7 = if_else(diagnosis_v6 == "CN_00", "0", "1")) %>% 
+  group_by(EntrezGeneSymbol2, diagnosis_v7) %>% 
+  summarise(mean = mean(value, na.rm = T)) %>% 
+  pivot_wider(id_cols = EntrezGeneSymbol2, names_from = diagnosis_v7, values_from = mean) %>% 
+  mutate(diff = `1` / `0`,
+         log2fc = log2(diff))
+
+comp_cu0_cu1 %>% 
+  dplyr::select(EntrezGeneSymbol2, padj2) %>% 
+  left_join(est_cu0_cu1, by = "EntrezGeneSymbol2") %>% 
+  arrange(padj2) %>% 
+  mutate(nlogpadj = -log10(padj2),
+         color = if_else(log2fc < 0 & padj2 < 0.05, muted("blue"), "grey80"),
+         color = if_else(log2fc > 0 & padj2 < 0.05, muted("red"), color),
+         label = if_else(row_number() <= 15, EntrezGeneSymbol2, NA)
+         ) %>% 
+  ggplot(aes(x = log2fc, y = nlogpadj)) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(aes(fill = color), shape = 21, color = "white") +
+  geom_text_repel(aes(label = label), size = 2.8, max.overlaps = Inf) +
+  scale_x_continuous(limits = c(NA, NA)) +
+  scale_fill_identity() +
+  labs(title = "CU A+ vs CU A-") +
+  pl_msw0_nolegend_straight +
+  plot_layout(widths = unit(4, "cm"), heights = unit(4, "cm")) 
+ggsave(file.path(dir_plots, "plot_adni_somascan_cua+vscua-.pdf"), useDingbats = F)
+
+comp_cu0_cu1 %>% 
+  dplyr::select(EntrezGeneSymbol2, padj2) %>% 
+  left_join(est_cu0_cu1, by = "EntrezGeneSymbol2") %>% 
+  arrange(padj2) %>% 
+  write.xlsx(file.path(dir_stats, "stats_paper_DE_cu0vscu1.xlsx"), overwrite = T)
+```
+GO term analysis of upregulated terms
+```{r}
+go_up_comp_cu0_ci1 <- 
+  comp_cu0_ci1 %>% 
+  dplyr::select(EntrezGeneSymbol2, padj2) %>% 
+  left_join(est_cu0_ci1, by = "EntrezGeneSymbol2") %>% 
+  filter(padj2 < 0.05, log2fc > 0) %>% 
+  pull(EntrezGeneSymbol2) %>% 
+  enrichGO(OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "BP", pvalueCutoff = 1, pAdjustMethod = "fdr", universe = comp_cu0_ci1$EntrezGeneSymbol2)
+
+go_up_comp_cu0_cu1 <- 
+  comp_cu0_cu1%>% 
+  dplyr::select(EntrezGeneSymbol2, padj2) %>% 
+  left_join(est_cu0_cu1, by = "EntrezGeneSymbol2") %>% 
+  filter(padj2 < 0.05, log2fc > 0) %>% 
+  pull(EntrezGeneSymbol2) %>% 
+  enrichGO(OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "BP", pvalueCutoff = 1, pAdjustMethod = "fdr")
+```
+make plot for cn a+ vs cn a-
+```{r}
+plot_cn <- 
+  adni_merge_incl %>% 
+  left_join(data_score_ind, by = "RID") %>% 
+  filter(diagnosis_v7 %in% c("CN_0", "CN_1"), !is.na(value)) %>% 
+  mutate(diagnosis_v7 = factor(diagnosis_v7, levels = c("CN_0", "CN_1"))) %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    plot = pmap(list(data, name), function(x,y){
+      x %>% 
+        ggplot(aes(x = diagnosis_v7, y = val_z)) +
+        geom_violin(draw_quantiles = 0.5, aes(fill = diagnosis_v7)) +
+        pl_msw0_nolegend +
+        labs(title = y) +
+        stat_compare_means(method = "t.test", comparisons = list(c("CN_0", "CN_1")), hide.ns = T) +
+        plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+      }),
+    stats = map(data, function(x){compare_means(data = x, method = "t.test", formula = val_z~diagnosis_v7)})
+    )
+```
+make plot for ci a+ vs cn a-
+```{r}
+plot_ci <- 
+  adni_merge_incl %>% 
+  left_join(data_score_ind, by = "RID") %>% 
+  filter(diagnosis_v7 %in% c("CN_0", "CI_1"), !is.na(value)) %>% 
+  mutate(diagnosis_v7 = factor(diagnosis_v7, levels = c("CN_0", "CI_1"))) %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    plot = pmap(list(data, name), function(x,y){
+      x %>% 
+        ggplot(aes(x = diagnosis_v7, y = val_z)) +
+        geom_violin(draw_quantiles = 0.5, aes(fill = diagnosis_v7)) +
+        pl_msw0_nolegend +
+        labs(title = y) +
+        stat_compare_means(method = "t.test", comparisons = list(c("CN_0", "CI_1")), hide.ns = T) +
+        plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+      }),
+    stats = map(data, function(x){compare_means(data = x, method = "t.test", formula = val_z~diagnosis_v7)})
+    ) 
+```
+make plots across the ATN stages
+```{r}
+plot_diag <- 
+  data_score_ind %>% 
+  left_join(adni_merge_incl, by = "RID") %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    plot_atn = pmap(list(data, name), function(x,y){
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        ggplot(aes(x = ATN2, y = val_z)) +
+        geom_jitter(width = 0.2, shape = 21, aes(color = ATN2)) +
+        stat_summary(fun.y = median, fun.ymin = median, fun.ymax = median, geom = "crossbar", width = 0.3, color = "black", size = 0.3) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm")) +
+        stat_compare_means(method = "t.test", hide.ns = T, label = "p.signif", comparisons = FUN.make_comps(c("000", "100", "110", "111")), vjust = 0.55, step.increase = 0.3)
+      }),
+    plot_diag = pmap(list(data, name), function(x,y){
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        filter(!is.na(diagnosis_v3)) %>% 
+        mutate(diagnosis_v3 = factor(diagnosis_v3, levels = c("CN", "MCI_Alz", "Dem_Alz"))) %>% 
+        ggplot(aes(x = diagnosis_v3, y = val_z)) +
+        geom_jitter(width = 0.2, shape = 21, aes(color = diagnosis_v3)) +
+        stat_summary(fun.y = median, fun.ymin = median, fun.ymax = median, geom = "crossbar", width = 0.3, color = "black", size = 0.3) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(6:8)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm")) +
+        stat_compare_means(method = "t.test", hide.ns = T, label = "p.signif", comparisons = FUN.make_comps(c("CN", "MCI_Alz", "Dem_Alz")), vjust = 0.55, step.increase = 0.3)
+      }),
+    data_atn = map(data, function(x){
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        filter(!is.na(diagnosis_v3)) %>% 
+        arrange(ATN2) %>% 
+        dplyr::select(RID, ATN2, val_z)
+      }),
+    data_diagnosis = map(data, function(x){
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        filter(!is.na(diagnosis_v3)) %>% 
+        arrange(ATN2) %>% 
+        dplyr::select(RID, diagnosis_v3, val_z)
+      }),
+    stats_atn = map(data, function(x) 
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        compare_means(data = ., method = "t.test", p.adjust.method = "fdr", formula = val_z~ATN2)),
+    stats_diagn = map(data, function(x) 
+      x %>% 
+        filter(ATN2 %in% c("000", "100", "110", "111")) %>% 
+        filter(!is.na(diagnosis_v3)) %>% 
+        compare_means(data = ., method = "t.test", p.adjust.method = "fdr", formula = val_z~diagnosis_v3))
+    )
+```
+make mediation analysis
+```{r}
+dat_mediation <- 
+  adni_merge_incl %>% 
+  left_join(data_score_ind, by = "RID") %>% 
+  filter(ATN2 %in% c("000", "100"))  %>% 
+  pivot_wider(names_from = name, values_from = val_z, id_cols = c(RID, VISCODE2, AGE, PTGENDER, APOE4, PTAU, ABETA)) %>% 
+  mutate(PTAU = FUN.scale_z(PTAU), ABETA = FUN.scale_z(ABETA), ABETA = ABETA * -1)
+dat_mediation
+```
+Mediation model 3: pTau181 => glia  => inflammation in neg
+```{r}
+model3 <- 
+      "# direct effect
+      infl ~ c1*PTAU + c2*glia + d2*PTGENDER + d3*AGE +d4*APOE4
+      # mediation
+      glia ~ b1*PTAU + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+fit3 <- sem(model3, data = dat_mediation, bootstrap = 1000)
+summary(fit3, fit.measures = T, standardize = T)
+```
+Mediation model 4: pTau181 => death  => inflammation in neg
+```{r}
+model4 <- 
+      "# direct effect
+      infl ~ c1*PTAU + c2*death + d2*PTGENDER + d3*AGE
+      # mediation
+      death ~ b1*PTAU + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+fit4 <- sem(model4, data = dat_mediation, bootstrap = 1000)
+summary(fit4, fit.measures = T, standardize = T)
+```
+Mediation model 5: inflammation => synapse => death in neg
+```{r}
+model5 <- 
+      "# direct effect
+      death ~ c1*infl + c2*synapse + d2*PTGENDER + d3*AGE
+      # mediation
+      synapse ~ b1*infl + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model5 <- sem(model5, data = dat_mediation, bootstrap = 1000)
+summary(model5, fit.measures = T, standardize = T)
+```
+Mediation model 6: inflammation => transport => death in neg
+```{r}
+model6 <- 
+      "# direct effect
+      death ~ c1*infl + c2*transport + d2*PTGENDER + d3*AGE
+      # mediation
+      transport ~ b1*infl + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model6 <- sem(model6, data = dat_mediation, bootstrap = 1000)
+summary(model6, fit.measures = T, standardize = T)
+```
+Mediation model 7: inflammation => synapse => glia in neg
+```{r}
+model7 <- 
+      "# direct effect
+      glia~ c1*infl + c2*synapse + d2*PTGENDER + d3*AGE
+      # mediation
+      synapse ~ b1*infl + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model7 <- sem(model7, data = dat_mediation, bootstrap = 1000)
+summary(model7, fit.measures = T, standardize = T)
+```
+Mediation model 8: inflammation => transport => glia in neg
+```{r}
+model8 <- 
+      "# direct effect
+      glia~ c1*infl + c2*transport + d2*PTGENDER + d3*AGE
+      # mediation
+      transport ~ b1*infl + e2*PTGENDER + e3*AGE
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model8 <- sem(model8, data = dat_mediation, bootstrap = 1000)
+summary(model8, fit.measures = T, standardize = T)
+```
+
+
+
+
+
+

@@ -1,0 +1,1287 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Load standard packages
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+rm(list = ls())
+library(tidyverse)
+library(scales)
+library(broom)
+library(tidyheatmaps)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(scales)
+library(ggdendro)
+library(ggrepel)
+library(lavaan)
+library(enrichplot)
+library(lme4)
+library(lmerTest)
+library(RColorBrewer)
+library(broom.mixed)
+setwd("~/Desktop/R_work/Standards")
+list.files() %>% map(source)
+```
+Define directories
+```{r}
+dir_raw <- "path/to/your/directory"
+dir_plots <- "path/to/your/directory"
+dir_stats <- "path/to/your/directory"
+dir_obj <- "path/to/your/directory"
+```
+load data
+```{r}
+dat <- read_csv("/path/to/your/file.csv")
+```
+define parameters
+```{r}
+imaging_cor1 <- c(paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = ""), "mk_adni_suvr_infcg_metaroi", "braak_stage", "nav_adni_suvr_fullcg_neocortex", "hp_vol")
+cogn_cor1 <- c("cdr", "cdr_sob", "mmse")
+fluid_cor <- c("csf_ab40_pg_ml__lumip1", "csf_ab42_pg_ml__lumip1", "csf_ttau_pg_ml__lumip1", "csf_ptau181_pg_ml__simoa1", "csf_ptau217_pg_ml__simoa", "csf_ptau231_pg_ml__simoa1", "csf_ptau235_pg_ml__simoa", "csf_ptau202_pg_ml__simoa2", "csf_ptau205_pg_ml__simoa", "csf_taun224_pg_ml_", "csf_tau368_pg_ml_", "csf_nta_pg_ml__simoa", "csf_nfl_pg_ml_")
+```
+analyze seperately for diagnosis
+```{r, fig.width=10, fig.height=10}
+dat_include <- 
+  dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data_f1) %>% 
+  unnest %>% 
+  filter(!is.na(diagnosis_v1), protein != "SampleQC") %>% 
+  mutate(
+    diagnosis_v2 = if_else(diagnosis_v1 == "Other" & mmse >= 27, "CN", diagnosis_v1),
+    comps1 = if_else(diagnosis_v2 == "AD", "yes", NA), #AD vs CU
+    comps1 = if_else(diagnosis_v2 %in% c("CNY"), "no", comps1),
+    comps2 = if_else(diagnosis_v2 == "AD", "yes", NA), #AD vs MCI
+    comps2 = if_else(diagnosis_v2 %in% c("MCI"), "no", comps2),
+    comps3 = if_else(diagnosis_v2 == "MCI", "yes", NA), #MCI vs CU
+    comps3 = if_else(diagnosis_v2 %in% c("CNY"), "no", comps3),
+    comps4 = if_else(diagnosis_v2 == "CN", "yes", NA), #MCI vs CU
+    comps4 = if_else(diagnosis_v2 %in% c("CNY"), "no", comps2),
+    comps5 = if_else(diagnosis_v2 == "AD", "yes", "no"), #AD vs non AD,
+    comps6 = if_else(diagnosis_v2 == "CN" & Amy == "A+", "yes", NA), #CU A+ vs CU A-
+    comps6 = if_else(diagnosis_v2 == "CN" & Amy == "A-", "no", comps6), #CU A+ vs CU A-
+    comps7 = if_else(diagnosis_v2 == "AD", "yes", NA), #AD vs CU
+    comps7 = if_else(diagnosis_v2 %in% c("CN"), "no", comps7),
+    comps8 = if_else(diagnosis_v2 == "MCI", "yes", NA), #MCI vs CU
+    comps8 = if_else(diagnosis_v2 %in% c("CN"), "no", comps8),
+    comps9 = if_else(diagnosis_v2 %in% c("MCI", "AD") & Amy == "A+", "yes", NA), #CI A+ vs CU A-
+    comps9 = if_else(diagnosis_v2 %in% c("MCI", "AD") & Amy == "A-", "no", comps9), #CI A+ vs CU A-
+    comps10 = if_else(diagnosis_v2 %in% c("MCI", "AD") & Amy == "A+", "yes", NA), #A+ vs A- with CUY excluded
+    comps10 = if_else(diagnosis_v2 %in% c("CN") & Amy == "A-", "no", comps10), #A+ vs A- with CUY excluded
+    comps11 = if_else(diagnosis_v2 %in% c("CN") & Amy == "A-", "yes", NA), #CN A- vs CNY
+    comps11 = if_else(diagnosis_v2 %in% c("CNY"), "no", comps11), #CN A- vs CNY
+    comps12 = if_else(diagnosis_v2 %in% c("MCI", "AD") & Amy == "A+", "yes", NA),
+    comps12 = if_else(diagnosis_v2 %in% c("CN") & Amy == "A+", "no", comps12)
+    )
+# make t test -----
+dat_include_test <- 
+  dat_include %>% 
+  group_by(protein) %>% 
+  nest() %>% 
+  mutate(
+    #comp1: AD vs CUY
+    comps1_p = map(data, function(x) x %>% filter(!is.na(comps1)) %>% compare_means(data = ., formula = Value_lod~comps1, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps1_padj = p.adjust(comps1_p, n = 122, method = "fdr"),
+    comps1_log2fc = map(data, function(x) mean((x %>% filter(comps1 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps1 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp2: AD vs MCI
+    comps2_p = map(data, function(x) x %>% filter(!is.na(comps2)) %>% compare_means(data = ., formula = Value_lod~comps2, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps2_padj = p.adjust(comps2_p, n = 122, method = "fdr"),
+    comps2_log2fc = map(data, function(x) mean((x %>% filter(comps2 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps2 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp3: MCI vs CUY
+    comps3_p = map(data, function(x) x %>% filter(!is.na(comps3)) %>% compare_means(data = ., formula = Value_lod~comps3, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps3_padj = p.adjust(comps3_p, n = 122, method = "fdr"),
+    comps3_log2fc = map(data, function(x) mean((x %>% filter(comps3 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps3 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp4: CU vs CUY
+    comps4_p = map(data, function(x) x %>% filter(!is.na(comps4)) %>% compare_means(data = ., formula = Value_lod~comps4, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps4_padj = p.adjust(comps4_p, n = 122, method = "fdr"),
+    comps4_log2fc = map(data, function(x) mean((x %>% filter(comps4 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps4 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp5: AD vs non AD
+    comps5_p = map(data, function(x) x %>% filter(!is.na(comps5)) %>% compare_means(data = ., formula = Value_lod~comps5, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps5_padj = p.adjust(comps5_p, n = 122, method = "fdr"),
+    comps5_log2fc = map(data, function(x) mean((x %>% filter(comps5 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps5 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp6: CU A+ vs CU A-
+    comps6_p = map(data, function(x) x %>% filter(!is.na(comps6)) %>% compare_means(data = ., formula = Value_lod~comps6, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps6_padj = p.adjust(comps6_p, n = 122, method = "fdr"),
+    comps6_log2fc = map(data, function(x) mean((x %>% filter(comps6 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps6 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp7: AD vs CUY
+    comps7_p = map(data, function(x) x %>% filter(!is.na(comps7)) %>% compare_means(data = ., formula = Value_lod~comps7, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps7_padj = p.adjust(comps7_p, n = 122, method = "fdr"),
+    comps7_log2fc = map(data, function(x) mean((x %>% filter(comps7 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps7 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp8: MCI vs CUY
+    comps8_p = map(data, function(x) x %>% filter(!is.na(comps8)) %>% compare_means(data = ., formula = Value_lod~comps8, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps8_padj = p.adjust(comps8_p, n = 122, method = "fdr"),
+    comps8_log2fc = map(data, function(x) mean((x %>% filter(comps8 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps8 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp9: CI A+ vs CI A-
+    comps9_p = map(data, function(x) x %>% filter(!is.na(comps9)) %>% compare_means(data = ., formula = Value_lod~comps9, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps9_padj = p.adjust(comps9_p, n = 122, method = "fdr"),
+    comps9_log2fc = map(data, function(x) mean((x %>% filter(comps9 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps9 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp10: CI A+ vs CU A-
+    comps10_p = map(data, function(x) x %>% filter(!is.na(comps10)) %>% compare_means(data = ., formula = Value_lod~comps10, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps10_padj = p.adjust(comps10_p, n = 122, method = "fdr"),
+    comps10_log2fc = map(data, function(x) mean((x %>% filter(comps10 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps10 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp11: CU A- vs CUY
+    comps11_p = map(data, function(x) x %>% filter(!is.na(comps11)) %>% compare_means(data = ., formula = Value_lod~comps11, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps11_padj = p.adjust(comps11_p, n = 122, method = "fdr"),
+    comps11_log2fc = map(data, function(x) mean((x %>% filter(comps11 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps11 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    #comp12: CU A+ vs CI A+
+    comps12_p = map(data, function(x) x %>% filter(!is.na(comps12)) %>% compare_means(data = ., formula = Value_lod~comps12, method = "t.test", p.adjust.method = "fdr") %>% pull(p.adj)) %>% unlist(),
+    comps12_padj = p.adjust(comps12_p, n = 122, method = "fdr"),
+    comps12_log2fc = map(data, function(x) mean((x %>% filter(comps12 == "yes") %>% pull(Value_lod))) - mean((x %>% filter(comps12 == "no") %>% pull(Value_lod)))) %>% unlist(),
+    )
+
+# make volcano plots -----
+#make volcano plots
+plot_volcano <- 
+  dat_include_test %>% 
+  dplyr::select(is.numeric) %>% 
+  pivot_longer(-protein) %>% 
+  separate(name, into = c("comp", "stat"), sep = "_") %>% 
+  pivot_wider(id_cols = c(protein, comp), names_from = stat, values_from = value) %>% 
+  mutate(
+    nlogpadj = -log10(padj),
+    color = if_else(log2fc < 0 & padj < 0.05, muted("blue"), "grey80"),
+    color = if_else(log2fc > 0 & padj < 0.05, muted("red"), color),
+    ) %>% 
+  group_by(comp) %>% 
+  arrange(padj) %>% 
+  mutate(
+    label = if_else(row_number() <= 15, protein, NA),
+    label = if_else(padj < 0.05, label, NA)
+    ) %>% 
+  nest() %>% 
+  mutate(
+    volcano = pmap(list(data, comp), function(x,y){
+      x %>% 
+        ggplot(aes(x = log2fc, y = nlogpadj)) +
+        geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+        geom_vline(xintercept = 0, linetype = "dashed") +
+        geom_point(aes(fill = color), shape = 21, color = "white") +
+        geom_text_repel(aes(label = label), size = 2.8, max.overlaps = Inf) +
+        scale_x_continuous(limits = c(NA, NA)) +
+        scale_fill_identity() +
+        labs(title = y) +
+        pl_msw0_nolegend_straight +
+        plot_layout(widths = unit(4, "cm"), heights = unit(4, "cm"))
+      })
+    )
+wrap_plots(plot_volcano$volcano)
+ggsave(file.path(dir_plots, "volcano_plots_disease.pdf"), useDingbats = F)
+#make GO term analysis -----
+dat_go <- 
+  plot_volcano %>% 
+  filter(comp %in% c("comps1", "comps3", "comps4", "comps10", "comps11", "comps6")) %>% 
+  dplyr::select(data) %>% 
+  mutate(
+    genes_signif = map(data, function(x) x %>% filter(padj < 0.05) %>% pull(protein)),
+    go_bp = map(genes_signif, function(x) enrichGO(x, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "fdr", pvalueCutoff = 1, "org.Hs.eg.db")),
+    go_bp_res = map(go_bp, function(x) x@result %>% mutate(nlogpadj = -log10(p.adjust))),
+    go_cc = map(genes_signif, function(x) enrichGO(x, keyType = "SYMBOL", ont = "CC", pAdjustMethod = "fdr", pvalueCutoff = 1, "org.Hs.eg.db")),
+    go_cc_res = map(go_cc, function(x) x@result %>% mutate(nlogpadj = -log10(p.adjust)))
+    )
+
+# save volcano plots
+plot_volcano %>% filter(comp== "comps10") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_f1a.xlsx"), overwrite = T)
+plot_volcano %>% filter(comp== "comps6") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_f1i.xlsx"), overwrite = T)
+plot_volcano %>% filter(comp== "comps4") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_af1a.xlsx"), overwrite = T)
+plot_volcano %>% filter(comp== "comps3") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_af1b.xlsx"), overwrite = T)
+plot_volcano %>% filter(comp== "comps1") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_af1c.xlsx"), overwrite = T)
+plot_volcano %>% filter(comp== "comps11") %>% pull(data) %>% .[[1]] %>% dplyr::select(protein, padj, log2fc) %>% write.xlsx(file.path(dir_stats, "zz_af1f.xlsx"), overwrite = T)
+```
+make plots for pooled go terms (old version)
+```{r}
+#make plots for specific pooled go terms -----
+dat_gol_line_v1 <- 
+  dat_go %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  filter(comp %in% c("comps4", "comps3", "comps1")) %>%  
+  mutate(comp = factor(comp, levels = c("comps4", "comps3", "comps1"))) %>% 
+  #make summary column
+  mutate(
+    bp = if_else(str_detect(Description, "migration"), "migration", NA),
+    bp = if_else(str_detect(Description, "chemotaxis"), "chemotaxis", bp),
+    bp = if_else(str_detect(Description, "ERK"), "ERK_signaling", bp),
+    bp = if_else(str_detect(Description, "synaptic"), "synaptic_signaling", bp),
+    bp = if_else(str_detect(Description, "calcium"), "calcium_signaling", bp),
+    bp = if_else(str_detect(Description, "glia"), "glia", bp),
+    bp = if_else(str_detect(Description, "cytokine"), "zcytokine", bp)
+    ) %>% 
+  filter(!is.na(bp)) %>% 
+  separate(GeneRatio, into = c("g1", "g2"), sep = "/", remove = F) %>% 
+  separate(BgRatio, into = c("b1", "b2"), sep = "/", remove = F) %>% 
+  type_convert() %>% 
+  mutate(effsize = ((g1/g2) / (b1/b2)),
+         effsize2 = g1/g2,
+         composite = FUN.scale_01(effsize) + FUN.scale_01(nlogpadj)) %>% 
+  ungroup() %>% 
+  add_row(comp = rep("CU", 7), bp = c("migration", "chemotaxis", "synaptic_signaling", "calcium_signaling", "ERK_signaling", "glia", "zcytokine"), nlogpadj = rep(0, 7)) %>% 
+  add_row(comp = rep("CU", 7), bp = c("migration", "chemotaxis", "synaptic_signaling", "calcium_signaling", "ERK_signaling", "glia", "zcytokine"), effsize = rep(1, 7)) %>% 
+  add_row(comp = rep("CU", 7), bp = c("migration", "chemotaxis", "synaptic_signaling", "calcium_signaling", "ERK_signaling", "glia", "zcytokine"), composite = rep(0, 7)) %>% 
+  mutate(comp = factor(comp, levels = c("CU", "comps4", "comps3", "comps1")),
+         comp_num = as.numeric(comp)
+         )
+
+#make plots for specific cytokines -----
+dat_gol_line_v2 <- 
+  dat_go %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  filter(comp %in% c("comps4", "comps3", "comps1"),
+         Description %in% c("response to type II interferon", "response to tumor necrosis factor", "response to interleukin-1")) %>%  
+  separate(GeneRatio, into = c("g1", "g2"), sep = "/", remove = F) %>% 
+  separate(BgRatio, into = c("b1", "b2"), sep = "/", remove = F) %>% 
+  type_convert() %>% 
+  mutate(effsize = ((g1/g2) / (b1/b2)),
+         effsize2 = g1/g2,
+         composite = FUN.scale_01(effsize) + FUN.scale_01(nlogpadj)) %>% 
+  ungroup() %>% 
+  add_row(comp = rep("CU", 3), Description = c("response to type II interferon", "response to tumor necrosis factor", "response to interleukin-1"), nlogpadj = rep(0, 3)) %>% 
+  add_row(comp = rep("CU", 3), Description = c("response to type II interferon", "response to tumor necrosis factor", "response to interleukin-1"), effsize = rep(1, 3)) %>% 
+  add_row(comp = rep("CU", 3), Description = c("response to type II interferon", "response to tumor necrosis factor", "response to interleukin-1"), composite = rep(0, 3)) %>% 
+  mutate(comp = factor(comp, levels = c("CU", "comps4", "comps3", "comps1")),
+         comp_num = as.numeric(comp)
+         )
+
+#make go term plots for individual comparisons -----
+barplot(dat_go$go_bp[[1]], showCategory = 20) +
+  plot_layout(widths = unit(5, "cm"), heights = unit(10, "cm"))
+ggsave(file.path(dir_plots, "GO_barplot_ADvsCN.pdf"), useDingbats = F, width = unit(10, "cm"), height = unit(15, "cm"))
+barplot(dat_go$go_bp[[2]], showCategory = 20) +
+  plot_layout(widths = unit(5, "cm"), heights = unit(10, "cm"))
+ggsave(file.path(dir_plots, "GO_barplot_MCIvsCN.pdf"), useDingbats = F, width = unit(10, "cm"), height = unit(15, "cm"))
+barplot(dat_go$go_bp[[4]], showCategory = 20) +
+  plot_layout(widths = unit(5, "cm"), heights = unit(10, "cm"))
+ggsave(file.path(dir_plots, "GO_barplot_CNvsCNY.pdf"), useDingbats = F, width = unit(10, "cm"), height = unit(15, "cm"))
+#save plots for CU Ab+ vs AB-
+barplot(dat_go$go_bp[[3]], showCategory = c("synapse organization", "axonogenesis", "amyloid fibril formation", "NADH metabolic process", "axonal transport of mitochondrion", "canonical glycolysis")) +
+  plot_layout(widths = unit(2, "cm"), heights = unit(4, "cm"))
+ggsave(file.path(dir_plots, "go_barplot_CUAB+vsCUAB-.pdf"), useDingbats = F)
+
+## Plot GO terms
+dat_gol_line_v1 %>% 
+  filter(comp != "CU") %>% 
+  ggplot(aes(x = bp, y = nlogpadj, fill = bp)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_wrap(~comp_num, ncol = 4) +
+  pl_msw0_legend +
+  scale_fill_manual(values = cbPalette[1:7]) +
+  plot_layout(widths = unit(5, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "New_GO_term_pooled_disease_significance.pdf"), useDingbats = F)
+
+## Plot cytokines
+dat_gol_line_v2 %>% 
+  filter(comp != "CU") %>% 
+  ggplot(aes(x = Description, y = nlogpadj, fill = Description)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_wrap(~comp_num, ncol = 4) +
+  pl_msw0_legend +
+  scale_fill_manual(values = c(cbPalette[8:9], muted("red"))) +
+  plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "NEW_GO_term_cytokine_disease_significance.pdf"), useDingbats = F)
+```
+compare CU AB- with CU AB+ by using AUCell
+```{r}
+#retrieve genes from go term analysis
+go_interest <- 
+  dat_go %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  filter(Description %in% c(c("chemotaxis", "leukocyte migration", "ERK1 and ERK2 cascade", "response to chemokine", "response to interleukin-1", "response to tumor necrosis factor", "response to type II interferon", "regulation of calcium-mediated signaling", "glial cell activation"))) %>% 
+  group_by(Description, ID) %>% 
+  nest() %>% 
+  mutate(genes = map(data, function(x) x %>% pull(geneID) %>% paste(collapse = "/") %>% str_split("/") %>% unlist %>% unique))
+
+#retrieve genes with go database
+library(biomaRt)
+biomart_genes <- 
+  getBM(attributes = c('ensembl_gene_id', 'external_gene_name', 'go_id'), filters = 'go', values = go_interest$ID, mart = ensembl) %>% 
+  filter(go_id %in% go_interest$ID) %>% 
+  group_by(go_id) %>% 
+  nest() %>% 
+  mutate(gene = map(data, function(x) x$external_gene_name))
+#merge go terms
+go_interest <- 
+  AnnotationDbi::select(org.Hs.eg.db,
+                               keys = go_interest$ID,
+                               columns = c("SYMBOL", "GENENAME"),
+                               keytype = "GO") %>% 
+  group_by(GO) %>% 
+  nest() %>% 
+  mutate(genes2 = map(data, function(x) x$SYMBOL)) %>% 
+  right_join(go_interest, by = c("GO" = "ID")) %>% 
+  mutate(genes3 = pmap(list(genes, genes2), function(x,y) c(x,y) %>% unique))
+#make aucell analysis
+aucell_mtx <- 
+  dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data_f1) %>% 
+  unnest %>% 
+  dplyr::select(protein, id, Val_z) %>% 
+  pivot_wider(id_cols = protein, names_from = id, values_from = Val_z) %>% 
+  column_to_rownames("protein") %>% 
+  as.matrix()
+
+aucell_mtx_ranking <- AUCell_buildRankings(aucell_mtx, plotStats = F)
+aucell_geneset <- go_interest$genes %>% set_names(go_interest$Description)
+cells_AUC <- AUCell_calcAUC(aucell_geneset, aucell_mtx_ranking, aucMaxRank = 1000, normAUC = F)
+
+#make aucell plot
+plot_aucell <- 
+  getAUC(cells_AUC) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("id") %>% 
+  pivot_longer(-id) %>% 
+  type_convert() %>% 
+  left_join(dat$data[[1]], by = "id") %>% 
+  dplyr::select(name, diagnosis_v1, Amy, value) %>% 
+  filter(!is.na(Amy), diagnosis_v1 != "Other") %>% 
+  mutate(
+    diagnosis_v3 = if_else(diagnosis_v1 %in% c("CN", "CNY"), "CN", "CI"),
+    diagnosis_v4 = paste(diagnosis_v3, Amy, sep = "_"),
+    diagnosis_v4 = factor(diagnosis_v4, levels = c("CN_A-", "CN_A+", "CI_A-", "CI_A+")),
+    ) %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    plots_1 = pmap(list(data, name), function(x,y){
+      x %>% 
+        filter(diagnosis_v3 %in% "CN") %>% 
+        mutate(value = FUN.scale_z(value)) %>% 
+        ggplot(aes(x = diagnosis_v4, y = value, fill = diagnosis_v4)) +
+        geom_violin(draw_quantiles = 0.5) +
+        labs(title = y) +
+        scale_fill_manual(values = cbPalette[c(1,2)]) +
+        pl_msw0_legend +
+        stat_compare_means(method = "t.test", comparisons = list(c("CN_A-", "CN_A+")), hide.ns = F, label = "p.signif") +
+        plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plots_2 = pmap(list(data, name), function(x,y){
+      x %>% 
+        filter(diagnosis_v4 %in% c("CN_A-", "CI_A+")) %>%
+        mutate(value = FUN.scale_z(value)) %>% 
+        ggplot(aes(x = diagnosis_v4, y = value, fill = diagnosis_v4)) +
+        geom_violin(draw_quantiles = 0.5) +
+        labs(title = y) +
+        scale_fill_manual(values = cbPalette[c(1,2)]) +
+        pl_msw0_legend +
+        stat_compare_means(method = "t.test", comparisons = list(c("CN_A-", "CI_A+")), hide.ns = F, label = "p.signif") +
+        plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plots_3 = pmap(list(data, name), function(x,y){
+      x %>% 
+        filter(diagnosis_v4 %in% c("CN_A+", "CI_A+")) %>% 
+        mutate(value = FUN.scale_z(value)) %>% 
+        ggplot(aes(x = diagnosis_v4, y = value, fill = diagnosis_v4)) +
+        geom_violin(draw_quantiles = 0.5) +
+        labs(title = y) +
+        scale_fill_manual(values = cbPalette[c(1,2)]) +
+        pl_msw0_legend +
+        stat_compare_means(method = "t.test", comparisons = list(c("CN_A+", "CI_A+")), hide.ns = F, label = "p.signif") +
+        plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+      }),
+    stats1 = map(data, function(x){
+      x %>% 
+        filter(diagnosis_v3 %in% "CN") %>% 
+        mutate(value = FUN.scale_z(value)) %>% 
+        compare_means(data = ., method = "t.test", formula =value~diagnosis_v4)}),
+    stats2 = map(data, function(x){
+      x %>% 
+        filter(diagnosis_v4 %in% c("CN_A-", "CI_A+")) %>% 
+        mutate(value = FUN.scale_z(value)) %>% 
+        compare_means(data = ., method = "t.test", formula =value~diagnosis_v4)})
+    )
+```
+check for gfap expression
+```{r}
+dat_include_test %>% 
+  filter(protein == "GFAP") %>% 
+  pull(data) %>% 
+  .[[1]] %>% 
+  filter(!is.na(comps10)) %>%
+  ggplot(aes(x = comps10, y = Value_lod, fill = comps10)) +
+  geom_violin(draw_quantiles = 0.5) +
+  scale_fill_manual(values = cbPalette[c(1,2)]) +
+  pl_msw0_legend +
+  stat_compare_means(method = "t.test", comparisons = list(c("yes", "no")), hide.ns = F, label = "p.signif") +
+  plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "gfap_CIA+vsCUA-.pdf"), useDingbats = F)
+dat_include_test %>% 
+  filter(protein == "GFAP") %>% 
+  pull(data) %>% 
+  .[[1]] %>% 
+  filter(!is.na(comps6)) %>% 
+  ggplot(aes(x = comps6, y = Value_lod, fill = comps6)) +
+  geom_violin(draw_quantiles = 0.5) +
+  scale_fill_manual(values = cbPalette[c(1,2)]) +
+  pl_msw0_legend +
+  stat_compare_means(method = "t.test", comparisons = list(c("yes", "no")), hide.ns = F, label = "p.signif") +
+  plot_layout(widths = unit(1.25, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "gfap_CUA+vsCUA-.pdf"), useDingbats = F)
+```
+calculate correlations and show them as heatmap
+```{r, fig.height=10}
+dat_prep <- 
+  dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data_f1) %>% 
+  unnest %>% 
+  type_convert() %>% 
+  ungroup() %>% 
+  #filter(ATN %in% c("A-T-N-", "A+T-N-", "A+T+N-", "A+T+N+")) %>% 
+  pivot_wider(id_cols = c("id", imaging_cor1, fluid_cor, cogn_cor1, "Gender", "age_at_mri", "APOE_num"), names_from = protein, values_from = Value_lod) %>% 
+  filter(!is.na(nav_adni_suvr_fullcg_neocortex)) %>% 
+  pivot_longer(ACHE:YWHAZ, names_to = "Protein", values_to = "Value_Protein") %>% 
+  pivot_longer(cols = c(imaging_cor1, fluid_cor, cogn_cor1), names_to = "Imaging", values_to = "Value_Imaging") %>% 
+  group_by(Protein, Imaging) %>% 
+  nest()
+
+#make correlation analysis  
+cor_v1 <- 
+  dat_prep %>% 
+  mutate(
+    cor_spearman = map(data, function(x){
+      cor.test(x$Value_Protein, x$Value_Imaging, method = "spearman", use = "na.or.complete")
+      }),
+    cor_spearman_tidy = map(cor_spearman, tidy),
+    cor_spearman_p = map(cor_spearman_tidy, function(x) x$p.value) %>% unlist, # extract p value
+    cor_spearman_padj = map(cor_spearman_p, function(x) p.adjust(x, n = (nrow(dat))/2, "fdr")) %>% unlist, # adjust p value
+    cor_spearman_r = map(cor_spearman_tidy, function(x) x$estimate) %>% unlist, # extract R
+    #change sign of hpc volume, csf ab42, and mmse
+    cor_spearman_r2 = if_else(Imaging %in% c("hp_vol", "csf_ab42_pg_ml__lumip1", "mmse"), cor_spearman_r*-1, cor_spearman_r)
+    )
+#make glm analysis  
+glm_v1 <- 
+  dat_prep %>% 
+  mutate(
+    glm = map(data, function(x){glm(data = x, formula = Value_Imaging~Value_Protein+Gender+age_at_mri+APOE_num)}),
+    glm_tidy = map(glm, tidy),
+    glm_e = map(glm_tidy, function(x) x$estimate[2]) %>% unlist,
+    glm_p = map(glm_tidy, function(x) x$p.value[2]) %>% unlist
+    )
+
+#R for plotting ----
+pdf(file.path(dir_plots, "Plot_heatmap_r_cor.pdf"), width = unit(20, "cm"), height = unit(20, "cm"))
+heatmap_r_v1 <- 
+  cor_v1 %>% 
+  dplyr::select(Protein, Imaging, cor_spearman_r2) %>% 
+  filter(Imaging %in% c(cogn_cor1, imaging_cor1)) %>% 
+  tidyheatmaps::tidy_heatmap(rows = Protein, columns = Imaging, values = cor_spearman_r2, cluster_rows = T, cluster_cols = T, fontsize = 6, cellwidth = 8, cellheight = 2, treeheight_row = 20, treeheight_col = 20, show_selected_row_labels = c("Ab42", "pTau217", "pTau181", "pTau231", "TREM2", "GFAP", "NEFL", "MAPT"))
+dev.off()
+#Padj for plotting
+pdf(file.path(dir_plots, "Plot_heatmap_padj_cor.pdf"), width = unit(20, "cm"), height = unit(20, "cm"))
+cor_v1 %>% 
+  dplyr::select(Protein, Imaging, cor_spearman_p, cor_spearman_padj, cor_spearman_r2) %>% 
+  filter(Imaging %in% c(cogn_cor1, imaging_cor1)) %>% 
+  #use not adjusted p value
+  mutate(nlogpadj = -log10(cor_spearman_p),
+         signif = if_else(cor_spearman_p > 0.05, 0, nlogpadj),
+         signif = if_else(signif == Inf, 20 , nlogpadj),
+         signif2 = if_else(cor_spearman_p > 0.05, NA, nlogpadj),
+         signif2 = if_else(signif2 == Inf, 20 , signif2),
+         signif2 = if_else(signif2 > 20, 20 , signif2),
+         Protein = factor(Protein, levels = heatmap_r_v1$tree_row$labels[heatmap_r_v1$tree_row$order]),
+         Imaging = factor(Imaging, levels = heatmap_r_v1$tree_col$labels[heatmap_r_v1$tree_col$order])
+         ) %>% 
+  arrange(Protein, Imaging) %>% 
+  tidyheatmaps::tidy_heatmap(rows = Protein, columns = Imaging, values = signif2, fontsize = 6, cellwidth = 8, cellheight = 2, treeheight_row = 30, treeheight_col = 30, color_na = "grey90", show_selected_row_labels = c("Ab42", "pTau217", "pTau181", "pTau231", "TREM2", "GFAP", "NEFL", "MAPT"), colors = brewer.pal(10, "YlOrRd"))
+dev.off()
+
+
+#Plot values across Braak stages -----
+pdf(file.path(dir_plots, "Plot_heatmap_braak.pdf"), width = unit(20, "cm"), height = unit(20, "cm"))
+dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data_f1) %>% 
+  unnest %>% 
+  group_by(protein) %>% 
+  filter(!is.na(nav_adni_suvr_fullcg_neocortex)) %>% 
+  dplyr::select(protein, braak_stage, Val_z) %>% 
+  filter(!is.na(braak_stage), !is.na(Val_z), !Val_z %in% Inf) %>% 
+  group_by(braak_stage, protein) %>% 
+  summarise(mean = mean(Val_z, na.rm = T)) %>% 
+  tidyheatmaps::tidy_heatmap(rows = protein, columns = braak_stage, values = mean, cluster_rows = T, cluster_cols = F, fontsize = 6, cellwidth = 6, cellheight = 4, treeheight_row = 30, treeheight_col = 30, scale = "row")
+dev.off()
+```
+get the clusters from pheatmap
+```{r}
+library(factoextra)
+library(ggdendro)
+heatmap_cluster_mtx <- 
+  cor_v1 %>% 
+  dplyr::select(Protein, Imaging, cor_spearman_r2) %>% 
+  filter(Imaging %in% c(cogn_cor1, imaging_cor1)) %>% 
+  pivot_wider(names_from = Imaging, values_from = cor_spearman_r2) %>% 
+  column_to_rownames("Protein")
+#make elbow plot ####
+fviz_nbclust(heatmap_cluster_mtx, FUN = hcut, method = "wss") + 
+  labs(title = "Elbow Method for Optimal Clusters") +
+  plot_layout(widths = unit(5, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "plot_elbow.pdf"), useDingbats = F)
+#make dendrogram plot ####
+plot(hclust(dist(heatmap_cluster_mtx)), main = "Dendrogram", xlab = "Samples", ylab = "Height")
+dend_data <- 
+  hclust(dist(heatmap_cluster_mtx)) %>% 
+  as.dendrogram() %>% 
+  dendro_data() 
+dend_data %>% 
+  ggplot() +
+  geom_segment(data = dend_data$segments, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_text(data = dend_data$labels, aes(x = x, y = y, label = label), hjust = 1, angle = 90, size = 2.8) +
+  labs(title = "Dendrogram") +
+  pl_msw0_legend +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(),
+        axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  scale_y_continuous(limits = c(-3, 4)) +
+  plot_layout(widths = unit(10, "cm"), heights = unit(5, "cm"))
+ggsave(file.path(dir_plots, "plot_dendrogram.pdf"), useDingbats = F)
+#analyze individual clusters => generate 6 cluster ####
+df_heatmap_cluster <- 
+  tibble(
+    Genes = names(cutree(heatmap_r_v1$tree_row, k = 6)),
+    Cluster = cutree(heatmap_r_v1$tree_row, k = 6)) %>% 
+  group_by(Cluster) %>% 
+  nest()
+#visualize the similarities between the clusters ####
+pdf(file = file.path(dir_plots, "plot_dissimilarity.pdf"), useDingbats = F)
+heatmap_cluster_mtx %>% 
+  rownames_to_column("Protein") %>% 
+  left_join((df_heatmap_cluster %>% unnest()), by = c("Protein" = "Genes")) %>% 
+  column_to_rownames("Protein") %>% 
+  aggregate(. ~ Cluster, data = ., FUN = mean) %>% 
+  dplyr::select(-Cluster) %>% 
+  dist() %>% 
+  pheatmap::pheatmap(., cluster_rows = FALSE, cluster_cols = FALSE, cellwidth = 10, cellheight = 10)
+dev.off()
+
+heatmap_cluster_mtx %>% 
+  rownames_to_column("Protein") %>% 
+  left_join((df_heatmap_cluster %>% unnest()), by = c("Protein" = "Genes")) %>% 
+  column_to_rownames("Protein") %>% 
+  aggregate(. ~ Cluster, data = ., FUN = mean) %>% 
+  dplyr::select(-Cluster) %>% 
+  dist() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  write.xlsx(file.path(dir_stats, "zz_af2c.xlsx"), overwrite = T)
+
+#make go term analysis of different clusters ####
+df_heatmap_cluster_go <- 
+  df_heatmap_cluster %>% 
+  filter(!Cluster %in% c(3,6)) %>% 
+  mutate(
+    go_bp = map(data, function(x) enrichGO(x$Genes, keyType = "SYMBOL", OrgDb = "org.Hs.eg.db", ont = "BP", pvalueCutoff = 1, pAdjustMethod = "fdr")),
+    go_bp_res = map(go_bp, function(x) x@result)
+    )
+```
+perform GO term analysis with upregulated genes
+```{r, fig.height=10, fig.width=10}
+go_v2 <- 
+  cor_v1 %>% 
+  filter(cor_spearman_padj < 0.05) %>% 
+  dplyr::select(Protein, Imaging, cor_spearman_r) %>% 
+  group_by(Imaging) %>% 
+  nest() %>% 
+  mutate(
+    cor_pos = map(data, function(x) x %>% filter(cor_spearman_r > 0) %>% pull(Protein)),
+    cor_neg = map(data, function(x) x %>% filter(cor_spearman_r < 0) %>% pull(Protein)),
+    ) %>% 
+  pivot_longer(cols = c(cor_pos, cor_neg), names_to = "Cor", values_to = "Protein") %>% 
+  mutate(
+    cor_n = map(Protein, length) %>% unlist
+    ) %>% 
+  filter(cor_n > 5) %>% 
+  mutate(
+    go_bp = map(Protein, function(x) enrichGO(x, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 1, pAdjustMethod = "fdr", OrgDb = "org.Hs.eg.db")),
+    go_cc = map(Protein, function(x) enrichGO(x, keyType = "SYMBOL", ont = "CC", pvalueCutoff = 1, pAdjustMethod = "fdr", OrgDb = "org.Hs.eg.db")),
+    go_bp_res = pmap(list(go_bp, Imaging, Cor), function(x,y,z) x@result %>% add_column(var = y, dir = z, go = "bp")),
+    go_cc_res = pmap(list(go_cc, Imaging, Cor), function(x,y,z) x@result %>% add_column(var = y, dir = z, go = "cc"))
+    )
+#check top hits
+go_v2 %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  group_by(Imaging, dir) %>% 
+  arrange(p.adjust) %>% 
+  dplyr::slice(1:20) %>% 
+  dplyr::select(dir, everything())
+#included go terms
+include_GO <- c("neuron apoptotic process", "axonal transport", "modulation of chemical synaptic transmission", "neuroinflammatory response", "glial cell activation")
+include_cors <- c("mk_adni_suvr_infcg_braak1", "mk_adni_suvr_infcg_braak2", "mk_adni_suvr_infcg_braak3", "mk_adni_suvr_infcg_braak4", "mk_adni_suvr_infcg_braak5", "mk_adni_suvr_infcg_braak6", "nav_adni_suvr_fullcg_neocortex", "hp_vol", "cdr", "cdr_sob", "mmse")
+#make plots
+go_v2_pl1 <- 
+  go_v2 %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  filter(Description %in% include_GO) %>% 
+  dplyr::select(dir, everything()) %>% 
+  filter(Imaging %in% include_cors) %>% 
+  dplyr::select(dir, Imaging, Description, p.adjust) %>% 
+  mutate(
+    Imaging = factor(Imaging, levels = include_cors),
+    sign = if_else(dir == "cor_pos", 1, -1),
+    logpadj = -log10(p.adjust),
+    slogpadj = sign(sign) * -log10(p.adjust)
+    ) %>% 
+  group_by(Description) %>% 
+  nest() %>% 
+  mutate(
+    plot_v1 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        right_join(tibble(Imaging = include_cors), by = "Imaging") %>% 
+        mutate(logpadj = if_else(is.na(logpadj), 0, logpadj),
+               slogpadj = if_else(is.na(slogpadj), 0, slogpadj),
+               Imaging = factor(Imaging, levels = include_cors)) %>% 
+        ggplot(aes(x = Imaging, y = slogpadj, fill = logpadj)) +
+        geom_bar(stat = "identity", color = "black", width = 0.7) +
+        geom_hline(yintercept = 0, color = "black") +
+        geom_hline(yintercept = -log10(0.001), color = "black", linetype = "dashed") +
+        geom_hline(yintercept = log10(0.001), color = "black", linetype = "dashed") +
+        scale_fill_gradient2(low = "grey80", high = muted("red")) +
+        labs(title = y, y = "Signed -log10 Padj") +
+        pl_msw0_legend +
+        theme(axis.title.x = element_blank()) +
+        plot_layout(widths = unit(6, "cm"), heights = unit(2.5, "cm"))
+    }),
+    dat_exp = pmap(list(data, Description), function(x,y){
+      x %>% 
+        right_join(tibble(Imaging = include_cors), by = "Imaging") %>% 
+        mutate(logpadj = if_else(is.na(logpadj), 0, logpadj),
+               slogpadj = if_else(is.na(slogpadj), 0, slogpadj),
+               Imaging = factor(Imaging, levels = include_cors))
+    })
+  )
+```
+generate score for mitochondrial dysfunction, inflammation, and neuronal cell death, synapse transmission
+```{r}
+dat_include <- 
+  dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data_f1) %>% 
+  unnest %>% 
+  filter(ATN %in% c("A-T-N-", "A+T-N-", "A+T+N-", "A+T+N+")) 
+genelists <- 
+  go_v2 %>% 
+  dplyr::select(go_bp_res) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  filter(Description %in% c("neuron apoptotic process", "axonal transport", "modulation of chemical synaptic transmission", "neuroinflammatory response", "glial cell activation")) %>% 
+  group_by(Description) %>% 
+  nest() %>% 
+  mutate(
+    genelist = map(data, function(x) x %>% pull(geneID) %>% unlist() %>% paste(collapse = "/") %>% str_split("/") %>% .[[1]] %>% unique()),
+    scores = map(genelist, function(x) dat_include %>% filter(protein %in% x) %>% group_by(id) %>% summarise(mean = mean(Val_z, na.rm = T)))
+    ) %>% 
+  dplyr::select(-data)
+dat_gos <- 
+  genelists %>% 
+  dplyr::select(Description, scores) %>% 
+  unnest() %>% 
+  left_join(dat_include, by = "id") %>% 
+  ungroup() %>% 
+  group_by(id, Description) %>% 
+  filter(!duplicated(id)) %>% 
+  group_by(Description) %>% 
+  nest() %>% 
+  mutate(
+    plot_atn = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = ATN, y = mean, color = ATN)) +
+        geom_jitter(width = 0.2, shape = 21) +
+        stat_summary(fun.y = median, fun.ymin = median, fun.ymax = median, geom = "crossbar", width = 0.3, color = "black", size = 0.3) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm")) +
+        stat_compare_means(method = "t.test", hide.ns = T, label = "p.signif", comparisons = FUN.make_comps(dat_include$ATN))
+      }),
+    stat_atn = map(data, function(x) x %>% filter(mean > -5) %>% compare_means(data = ., formula = mean~ATN, method = "t.test")),
+    plot_diagnosis = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = diagnosis_v1, y = mean, color = diagnosis_v1)) +
+        geom_jitter(width = 0.2, shape = 21) +
+        stat_summary(fun.y = median, fun.ymin = median, fun.ymax = median, geom = "crossbar", width = 0.3, color = "black", size = 0.3) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(5:9)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm")) +
+        stat_compare_means(method = "t.test", hide.ns = T, label = "p.signif", comparisons = FUN.make_comps(dat_include$diagnosis_v1))
+      }),
+    stat_dia = map(data, function(x) x %>% filter(mean > -5) %>% compare_means(data = ., formula = mean~diagnosis_v1, method = "t.test")),
+    plot_cor_nav = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = nav_adni_suvr_fullcg_neocortex, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_hpc = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = hp_vol, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak1 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak1, y = mean)) +
+       # geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak2 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak2, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak3 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak3, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak4 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak4, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak5 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak5, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_cor_braak6 = pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = mk_adni_suvr_infcg_braak6, y = mean)) +
+        #geom_jitter(width = 0.2, shape = 21, aes(color = ATN, fill = ATN), alpha = 0.2) +
+        geom_smooth(method = "lm", aes(color = ATN, fill = ATN)) +
+        pl_msw0_legend_straight +
+        scale_color_manual(values = cbPalette[c(1:4)]) +
+        scale_fill_manual(values = cbPalette[c(1:4)]) +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    plot_braakstage =pmap(list(data, Description), function(x,y){
+      x %>% 
+        filter(mean > -5) %>% 
+        ggplot(aes(x = braak_stage, y = mean)) +
+        geom_point(shape = 21, alpha = 0.5, fill = muted("red")) +
+        geom_smooth(color = muted("red"), fill = muted("red")) +
+        pl_msw0_legend_straight +
+        labs(y = y) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      })
+    )
+```
+make statistical analysis of correlations
+```{r, fig.width=10}
+#for all participants
+cor_go_test <- 
+  dat_gos %>% 
+  dplyr::select(Description, data) %>% 
+  ungroup() %>% 
+  unnest() %>% 
+  type_convert() %>% 
+  pivot_longer(cols = c("mk_adni_suvr_infcg_braak1", "mk_adni_suvr_infcg_braak2", "mk_adni_suvr_infcg_braak3", "mk_adni_suvr_infcg_braak4", "mk_adni_suvr_infcg_braak5", "mk_adni_suvr_infcg_braak6", "nav_adni_suvr_fullcg_neocortex", "hp_vol", "cdr", "cdr_sob", "mmse"), names_to = "params", values_to = "values") %>% 
+  group_by(Description, params, ATN) %>% 
+  nest() %>% 
+  mutate(
+    cor.test = map(data, function(x) cor.test(x$mean, x$values, method = "spearman")),
+    cor.test.tidy = map(cor.test, tidy),
+    cor.r = map(cor.test.tidy, function(x) x$estimate) %>% unlist(),
+    cor.p = map(cor.test.tidy, function(x) x$p.value) %>% unlist(),
+    cor.padj = map(cor.p, function(x) p.adjust(x, "fdr", n = 11)) %>% unlist()
+    )
+##save data
+cor_go_test %>% 
+  dplyr::select(-data, -cor.test, -cor.test.tidy) %>% 
+  mutate(across(where(is.numeric), ~ round(x = .x, digits = 3))) %>% 
+  write.xlsx(file.path(dir_stats, "stats_go_cor.xlsx"), overwrite = T)
+
+# for > 50 years old participants
+cor_go_test_age <- 
+  dat_gos %>% 
+  dplyr::select(Description, data) %>% 
+  ungroup() %>% 
+  unnest() %>% 
+  type_convert() %>% 
+  filter(age_at_mri > 50) %>% 
+  pivot_longer(cols = c("mk_adni_suvr_infcg_braak1", "mk_adni_suvr_infcg_braak2", "mk_adni_suvr_infcg_braak3", "mk_adni_suvr_infcg_braak4", "mk_adni_suvr_infcg_braak5", "mk_adni_suvr_infcg_braak6", "nav_adni_suvr_fullcg_neocortex", "hp_vol", "cdr", "cdr_sob", "mmse"), names_to = "params", values_to = "values") %>% 
+  group_by(Description, params, ATN) %>% 
+  nest() %>% 
+  mutate(
+    cor.test = map(data, function(x) cor.test(x$mean, x$values, method = "spearman")),
+    cor.test.tidy = map(cor.test, tidy),
+    cor.r = map(cor.test.tidy, function(x) x$estimate) %>% unlist(),
+    cor.p = map(cor.test.tidy, function(x) x$p.value) %>% unlist(),
+    cor.padj = map(cor.p, function(x) p.adjust(x, "fdr", n = 11)) %>% unlist()
+    )
+
+#make heatmaps ----
+pdf(file.path(dir_plots, "heatmap_cor_go.pdf"), useDingbats = F, width = unit(20, "cm"))
+cor_go_test %>% 
+  dplyr::select(-data, -cor.test, -cor.test.tidy) %>% 
+  mutate(params = factor(params, levels = include_cors)) %>% 
+  arrange(desc(ATN), params) %>% 
+  mutate(r2 = if_else(cor.p < 0.05, cor.r, NA)) %>% 
+  tidy_heatmap(rows = Description, columns = c(params, ATN), values = r2, color_na = "white", border_color = "grey80", fontsize = 8, cellwidth = 8, cellheight = 8)
+dev.off()
+#make heatmaps > 50 ----
+pdf(file.path(dir_plots, "heatmap_cor_go_age.pdf"), useDingbats = F, width = unit(20, "cm"))
+cor_go_test_age %>% 
+  dplyr::select(-data, -cor.test, -cor.test.tidy) %>% 
+  mutate(params = factor(params, levels = include_cors)) %>% 
+  arrange(desc(ATN), params) %>% 
+  mutate(r2 = if_else(cor.p < 0.05, cor.r, NA)) %>% 
+  tidy_heatmap(rows = Description, columns = c(params, ATN), values = r2, color_na = "white", border_color = "grey80", fontsize = 8, cellwidth = 8, cellheight = 8)
+dev.off()
+```
+make mediation analysis
+```{r}
+library(lavaan)
+params <- c("age_at_mri", "mmse", "education", "mk_adni_suvr_infcg_metaroi", include_cors)
+dat_med <- 
+  genelists %>% 
+  dplyr::select(Description, scores) %>% 
+  unnest() %>% 
+  pivot_wider(id_cols = id, names_from = Description, values_from = mean) %>% 
+  set_names(c("id", "synapse", "inflammation", "death", "glia", "mito"))
+dat_med_all <- 
+  dat_include %>% 
+  ungroup() %>% 
+  filter(id %in% dat_med$id, protein %in% "pTau217") %>% 
+  filter(!duplicated(id)) %>% 
+  type_convert() %>% 
+  dplyr::select(-tissue, -protein) %>% 
+  right_join(dat_med, by = "id") %>% 
+  mutate(across(.cols = c(params, "synapse", "inflammation", "death", "glia", "mito", "Value_lod"), FUN.scale_z)) %>% 
+  filter(synapse > -5, inflammation > -5, death > -5, glia > -5, mito > -5) %>% 
+  mutate(hp_vol = hp_vol * -1,
+         mmse = mmse * -1) #everything worse should go up
+#in a-t-n- and a+t-n-
+dat_med_neg <- 
+  dat_include %>% 
+  ungroup() %>% 
+  filter(id %in% dat_med$id, protein %in% "pTau217") %>% 
+  filter(!duplicated(id)) %>% 
+  type_convert() %>% 
+  dplyr::select(-tissue, -protein) %>% 
+  right_join(dat_med, by = "id") %>% 
+  filter(ATN %in% c("A-T-N-", "A+T-N-")) %>% 
+  mutate(across(.cols = c(params, "Value_lod", "synapse", "inflammation", "death", "glia", "mito"), FUN.scale_z)) %>% 
+  filter(synapse > -5, inflammation > -5, death > -5, glia > -5, mito > -5) %>% 
+  mutate(hp_vol = hp_vol * -1,
+         mmse = mmse * -1) #everything worse should go up
+```
+Mediation model 1: tau => death => inflammation in all and neg
+```{r}
+model1 <- 
+  tibble(var = paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = "")) %>% 
+  mutate(
+    formula = map(var, function(x)
+      paste(
+      "# direct effect
+      inflammation ~ c1*",x, "+ c2*death + d2*education + d3*age_at_mri
+      # mediation
+      death ~ b1*",x, "+ e2*education + e3*age_at_mri
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+      )),
+    fit_all = map(formula, function(x) sem(x, data = dat_med_all, bootstrap = 1000)),
+    fit_all_summary = map(fit_all, function(x) summary(x, fit.measures = T, standardize = T)),
+    fit_all_summary_pe = map(fit_all_summary, function(x) x$pe),
+    fit_neg = map(formula, function(x) sem(x, data = dat_med_neg, bootstrap = 1000)),
+    fit_neg_summary = map(fit_neg, function(x) summary(x, fit.measures = T, standardize = T)),
+    fit_neg_summary_pe = map(fit_neg_summary, function(x) x$pe)
+    )
+#make plots for all
+model1 %>% 
+  dplyr::select(var, fit_all_summary_pe) %>% 
+  unnest() %>% 
+  filter(label %in% c("indirect", "total", "c1", "c2", "b1")) %>% 
+  mutate(signif = if_else(pvalue < 0.05, "y", "n"),
+         var = factor(var, levels = paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = "")),
+         label = factor(label, levels = c("total", "indirect", "c1", "c2", "b1"))) %>% 
+  ggplot(aes(x = var, y = std.all)) +
+  geom_bar(stat = "identity", position = position_dodge2(), aes(fill = label, color = signif), width = 0.9, alpha = 0.9) +
+  scale_fill_manual(values = cbPalette[c(1:5)]) +
+  scale_color_manual(values = c(muted("blue"), muted("red"))) +
+  scale_y_continuous(limits = c(NA,NA)) +
+  pl_msw0_legend +
+  plot_layout(widths = unit(6, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "plot_mediation_tau_death_inflammation_all.pdf"), useDingbats = F)
+```
+Mediation model 2: tau => glia => inflammation in all and neg
+```{r}
+model2 <- 
+  tibble(var = paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = "")) %>% 
+  mutate(
+    formula = map(var, function(x)
+      paste(
+      "# direct effect
+      inflammation ~ c1*",x, "+ c2*glia + d2*education + d3*age_at_mri
+      # mediation
+      glia ~ b1*",x, "+ e2*education + e3*age_at_mri
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+      )),
+    fit_all = map(formula, function(x) sem(x, data = dat_med_all, bootstrap = 1000)),
+    fit_all_summary = map(fit_all, function(x) summary(x, fit.measures = T, standardize = T)),
+    fit_all_summary_pe = map(fit_all_summary, function(x) x$pe),
+    fit_neg = map(formula, function(x) sem(x, data = dat_med_neg, bootstrap = 1000)),
+    fit_neg_summary = map(fit_neg, function(x) summary(x, fit.measures = T, standardize = T)),
+    fit_neg_summary_pe = map(fit_neg_summary, function(x) x$pe)
+    )
+#make plots for all
+model2 %>% 
+  dplyr::select(var, fit_all_summary_pe) %>% 
+  unnest() %>% 
+  filter(label %in% c("indirect", "total", "c1", "c2", "b1")) %>% 
+  mutate(signif = if_else(pvalue < 0.05, "y", "n"),
+         var = factor(var, levels = paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = "")),
+         label = factor(label, levels = c("total", "indirect", "c1", "c2", "b1"))) %>% 
+  ggplot(aes(x = var, y = std.all)) +
+  geom_bar(stat = "identity", position = position_dodge2(), aes(fill = label, color = signif), width = 0.9, alpha = 0.9) +
+  scale_fill_manual(values = cbPalette[c(1:5)]) +
+  scale_color_manual(values = c(muted("blue"), muted("red"))) +
+  scale_y_continuous(limits = c(NA,NA)) +
+  pl_msw0_legend +
+  plot_layout(widths = unit(6, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "plot_mediation_tau_glia_inflammation_all.pdf"), useDingbats = F)
+#make plots for neg
+model2 %>% 
+  dplyr::select(var, fit_neg_summary_pe) %>% 
+  unnest() %>% 
+  filter(label %in% c("indirect", "total", "c1", "c2", "b1")) %>% 
+  mutate(signif = if_else(pvalue < 0.05, "y", "n"),
+         var = factor(var, levels = paste("mk_adni_suvr_infcg_braak", seq(1:6), sep = "")),
+         label = factor(label, levels = c("total", "indirect", "c1", "c2", "b1"))) %>% 
+  ggplot(aes(x = var, y = std.all)) +
+  geom_bar(stat = "identity", position = position_dodge2(), aes(fill = label, color = signif), width = 0.9, alpha = 0.9) +
+  scale_fill_manual(values = cbPalette[c(1:5)]) +
+  scale_color_manual(values = c(muted("blue"), muted("red"))) +
+  scale_y_continuous(limits = c(NA,NA)) +
+  pl_msw0_legend +
+  plot_layout(widths = unit(6, "cm"), heights = unit(2.5, "cm"))
+ggsave(file.path(dir_plots, "plot_mediation_tau_glia_inflammation_neg.pdf"), useDingbats = F)
+```
+Mediation model 3: pTau217 => glia  => inflammation in neg
+```{r}
+model3 <- 
+      "# direct effect
+      inflammation ~ c1*Value_lod + c2*glia + d2*education + d3*age_at_mri
+      # mediation
+      glia ~ b1*Value_lod + e2*education + e3*age_at_mri
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+fit3 <- sem(model3, data = dat_med_neg, bootstrap = 1000)
+summary(fit3, fit.measures = T, standardize = T)
+```
+Mediation model 4: pTau217 => death  => inflammation in neg
+```{r}
+model4 <- 
+      "# direct effect
+      inflammation ~ c1*Value_lod + c2*death + d2*education + d3*age_at_mri
+      # mediation
+      death ~ b1*Value_lod + e2*education + e3*age_at_mri
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+fit4 <- sem(model4, data = dat_med_neg, bootstrap = 1000)
+summary(fit4, fit.measures = T, standardize = T)
+```
+Mediation model 5: inflammation => synapse => death in neg
+```{r}
+model5 <- 
+      "# direct effect
+      death ~ c1*inflammation + c2*synapse + d2*education + d3*age_at_mri + d4*Value_lod
+      # mediation
+      synapse ~ b1*inflammation + e2*education + e3*age_at_mri + e4*Value_lod
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model5 <- sem(model5, data = dat_med_neg, bootstrap = 1000)
+summary(model5, fit.measures = T, standardize = T)
+```
+Mediation model 6: inflammation => synapse => death in neg
+```{r}
+model6 <- 
+      "# direct effect
+      death ~ c1*inflammation + c2*mito + d2*education + d3*age_at_mri + d4*Value_lod
+      # mediation
+      mito ~b1*inflammation + e2*education + e3*age_at_mri + e4*Value_lod
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model6 <- sem(model6, data = dat_med_neg, bootstrap = 1000)
+summary(model6, fit.measures = T, standardize = T)
+```
+Mediation model 7: inflammation => synapse => glia in neg
+```{r}
+model7 <- 
+      "# direct effect
+      glia ~ c1*inflammation + c2*synapse + d2*education + d3*age_at_mri +d4*Value_lod
+      # mediation
+      synapse ~ b1*inflammation + e2*education + e3*age_at_mri + e4*Value_lod
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model7 <- sem(model7, data = dat_med_neg, bootstrap = 1000)
+summary(model7, fit.measures = T, standardize = T)
+```
+Mediation model 8: inflammation => transport => glia in neg
+```{r}
+model8 <- 
+      "# direct effect
+      glia ~ c1*inflammation + c2*mito + d2*education + d3*age_at_mri +d4*Value_lod
+      # mediation
+      mito ~ b1*inflammation + e2*education + e3*age_at_mri + e4*Value_lod
+      # indirect effect (a*b)
+      indirect := b1*c2
+      # total effect
+      total := c1 + (b1*c2)
+      "
+model8 <- sem(model8, data = dat_med_neg, bootstrap = 1000)
+summary(model8, fit.measures = T, standardize = T)
+```
+make correlation analysis between ptau 217 and biological themes in neg
+```{r}
+plot_cor_ptau217 <- 
+  dat_med_neg %>% 
+  dplyr::select("ATN", "Value_lod", "synapse", "inflammation", "death", "glia", "mito") %>% 
+  pivot_longer(cols = synapse:mito) %>% 
+  group_by(name) %>% 
+  nest() %>% 
+  mutate(
+    plots = pmap(list(data, name), function(x,y){
+      x %>% 
+        ggplot(aes(x = Value_lod, y = value)) +
+        geom_point(aes(color = ATN), shape = 21) +
+        geom_smooth(method = "lm", color = "black") +
+        pl_msw0_legend_straight +
+        labs(y = y, title = y) +
+        scale_color_manual(values = cbPalette[c(1:2)]) +
+        stat_cor(size = 2.8) +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      })
+    )
+```
+Look at longitudinal data
+```{r}
+tmp <- 
+  dat_total %>% 
+  dplyr::select(id, PID, triad_ID, PID_visit, protein, Value_lod, tissue, diagnosis_v1, plasma_ptau217_pg_ml__alzpath) %>% 
+  filter(tissue == "csf") %>% 
+  separate(PID_visit, into = c("PID2", "visit"), sep = "VM", remove = F) %>% 
+  mutate(visit = if_else(visit == "00", "0", visit)) %>% 
+  type_convert() %>% 
+  filter(protein == "pTau217") %>% 
+  group_by(PID) %>% 
+  mutate(n = n())
+#define progression by ptau 217 NULISA increase in the csf
+tmp_rate <- 
+  tmp %>% 
+  filter(n > 1, !is.na(visit)) %>% 
+  group_by(PID) %>% 
+  nest() %>% 
+  mutate(
+    ptau_baseline = map(data, function(x) x %>% filter(visit %in% min(visit)) %>% pull(Value_lod)) %>% unlist,
+    ptau_end = map(data, function(x) x %>% filter(visit %in% max(visit)) %>% pull(Value_lod)) %>% unlist,
+    time_baseline = map(data, function(x) x %>% filter(visit %in% min(visit)) %>% pull(visit)) %>% unlist,
+    time_end = map(data, function(x) x %>% filter(visit %in% max(visit)) %>% pull(visit)) %>% unlist,
+    time_diff = (time_end - time_baseline)/12,
+    ptau_diff = ptau_end - ptau_baseline,
+    ptau_diff_year = ptau_diff / time_diff
+    ) %>% 
+  filter(time_diff != 0) %>% 
+  dplyr::select(-data)
+#generate a merged dataframe
+dat_long_merge <- 
+  dat_gos %>% 
+  dplyr::select(Description, data) %>% 
+  unnest() %>% 
+  dplyr::select(Description, id, PID, mean, diagnosis_v1, ATN, age_at_mri) %>% 
+  left_join(tmp_rate, by = "PID") %>% 
+  filter(!is.na(ptau_diff)) %>% 
+  group_by(Description) %>% 
+  mutate(n = n())
+
+#make dataframe of all samples that were measured ----
+dat_all_tmp <- 
+  dat %>% 
+  filter(tissue == "csf") %>% 
+  dplyr::select(data) %>% 
+  unnest %>% 
+  dplyr::select(id, PID, triad_ID, PID_visit, protein, Val_z, Value_lod, tissue, diagnosis_v1, ATN, Gender, age_at_mri) %>% 
+  separate(PID_visit, into = c("PID2", "visit"), sep = "VM", remove = F) %>% 
+  mutate(visit = if_else(visit == "00", "0", visit)) %>% 
+  type_convert()
+#make score for all individuals ----
+dat_all_scores <- 
+  genelists %>% 
+  mutate(
+    scores = map(genelist, function(x) dat_all_tmp %>% filter(protein %in% x) %>% group_by(id) %>% summarise(mean = mean(Val_z, na.rm = T)))
+    ) %>% 
+  dplyr::select(-genelist) %>% 
+  unnest() %>% 
+  pivot_wider(names_from = Description, id_cols = id, values_from = mean)
+
+#longitudinal data for CU ----
+dat_prep_long_CU <- 
+  dat_all_tmp %>% 
+  ungroup() %>% 
+  filter(protein == "pTau217") %>% 
+  group_by(PID) %>% 
+  mutate(n = n()) %>% 
+  filter(n > 1) %>% 
+  filter(!diagnosis_v1 %in% c("MCI", "AD")) %>% 
+  left_join(dat_all_scores, by = "id") %>% 
+  group_by(PID) %>% 
+  mutate(glia_diff = `glial cell activation` - `glial cell activation`[visit == min(visit)],
+         synapse_diff = `modulation of chemical synaptic transmission` - `modulation of chemical synaptic transmission`[visit == min(visit)],
+         infl_diff = `neuroinflammatory response` - `neuroinflammatory response`[visit == min(visit)],
+         death_diff = `neuron apoptotic process` - `neuron apoptotic process`[visit == min(visit)],
+         transp_diff = `axonal transport` - `axonal transport`[visit == min(visit)],
+         ptau_diff = Value_lod - Value_lod[visit == min(visit)],
+         visit_y = visit / 12
+         ) %>% 
+  pivot_longer(cols = glia_diff:ptau_diff, names_to = "Params", values_to = "Value") %>% 
+  group_by(Params) %>% 
+  nest() %>% 
+  mutate(
+    data = map(data, function(x){
+      x %>% 
+        group_by(triad_ID) %>% 
+        mutate(baseline = Val_z[visit == min(visit)]) %>% 
+        ungroup()
+      }),
+    plots = pmap(list(data, Params), function(x,y){
+      x %>% 
+        ggplot(aes(x = visit_y, y = Value, color = ATN3)) +
+        geom_smooth(method = "lm", se = T, alpha = 0.3) +
+        scale_color_manual(values = cbPalette[c(1,2)]) +
+        labs(y = y, title = y) +
+        pl_msw0_legend_straight +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    stats = map(data, function(x) lmer(Value ~ visit_y*ATN3 + Gender + age_at_mri + baseline + (1 | PID), data = x)),
+    stats_summary = map(stats, summary),
+    stats_tidy = map(stats, tidy),
+    #check only for A-
+    stats_Aneg = map(data, function(x) x %>% filter(ATN3 == "A-") %>% lmer(Value ~ visit_y + Gender + age_at_mri + baseline + (1 | PID), data = .)),
+    stats_Aneg_tidy = map(stats_Aneg, tidy),
+    #check only for A+
+    stats_Apos = map(data, function(x) x %>% filter(ATN3 == "A+") %>% lmer(Value ~ visit_y + Gender + age_at_mri + baseline + (1 | PID), data = .)),
+    stats_Apos_tidy = map(stats_Apos, tidy),
+    )
+#longitudinal data for CI ----
+dat_prep_long_CI <- 
+  dat_all_tmp %>% 
+  ungroup() %>% 
+  filter(protein == "pTau217") %>% 
+  group_by(PID) %>% 
+  mutate(n = n()) %>% 
+  filter(n > 1) %>% 
+  filter(diagnosis_v1 %in% c("MCI", "AD")) %>% 
+  left_join(dat_all_scores, by = "id") %>% 
+  group_by(PID) %>% 
+  mutate(glia_diff = `glial cell activation` - `glial cell activation`[visit == min(visit)],
+         synapse_diff = `modulation of chemical synaptic transmission` - `modulation of chemical synaptic transmission`[visit == min(visit)],
+         infl_diff = `neuroinflammatory response` - `neuroinflammatory response`[visit == min(visit)],
+         death_diff = `neuron apoptotic process` - `neuron apoptotic process`[visit == min(visit)],
+         transp_diff = `axonal transport` - `axonal transport`[visit == min(visit)],
+         ptau_diff = Value_lod - Value_lod[visit == min(visit)],
+         visit_y = visit / 12
+         ) %>% 
+  pivot_longer(cols = glia_diff:ptau_diff, names_to = "Params", values_to = "Value") %>% 
+  group_by(Params) %>% 
+  nest() %>% 
+  mutate(
+    data = map(data, function(x){
+      x %>% 
+        group_by(triad_ID) %>% 
+        mutate(baseline = Val_z[visit == min(visit)]) %>% 
+        ungroup()
+      }),
+    plots = pmap(list(data, Params), function(x,y){
+      x %>% 
+        ggplot(aes(x = visit_y, y = Value, color = ATN3)) +
+        geom_smooth(method = "lm", se = T, alpha = 0.3) +
+        scale_color_manual(values = cbPalette[c(1,2)]) +
+        labs(y = y, title = y) +
+        pl_msw0_legend_straight +
+        plot_layout(widths = unit(2.5, "cm"), heights = unit(2.5, "cm"))
+      }),
+    stats = map(data, function(x) lmer(Value ~ visit_y*ATN3 + Gender + age_at_mri + baseline + (1 | PID), data = x)),
+    stats_summary = map(stats, summary),
+    stats_tidy = map(stats, tidy),
+    stats_Apos = map(data, function(x) x %>% filter(ATN3 == "A+") %>% lmer(Value ~ visit_y + Gender + age_at_mri + baseline + (1 | PID), data = .)),
+    stats_Apos_tidy = map(stats_Apos, tidy),
+    )
+```
